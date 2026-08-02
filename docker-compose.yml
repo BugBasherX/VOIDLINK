@@ -1,0 +1,55 @@
+version: "3.9"
+
+# VOIDLINK — launch three interconnected nodes with one command:
+#   docker compose up --build
+#
+# Topology:
+#   A ──── B ──── C
+#    \          /
+#     \────────/
+#
+# After startup, attach to any node's container to issue commands:
+#   docker attach voidlink-a
+# (Detach without stopping: Ctrl-P then Ctrl-Q)
+
+services:
+  node-a:
+    build: .
+    container_name: voidlink-a
+    stdin_open: true
+    tty: true
+    ports:
+      - "5000:5000"
+    command: ["--id", "A", "--host", "0.0.0.0", "--port", "5000"]
+    networks:
+      - voidnet
+
+  node-b:
+    build: .
+    container_name: voidlink-b
+    stdin_open: true
+    tty: true
+    ports:
+      - "5001:5001"
+    command: ["--id", "B", "--host", "0.0.0.0", "--port", "5001"]
+    depends_on:
+      - node-a
+    networks:
+      - voidnet
+
+  node-c:
+    build: .
+    container_name: voidlink-c
+    stdin_open: true
+    tty: true
+    ports:
+      - "5002:5002"
+    command: ["--id", "C", "--host", "0.0.0.0", "--port", "5002"]
+    depends_on:
+      - node-b
+    networks:
+      - voidnet
+
+networks:
+  voidnet:
+    driver: bridge

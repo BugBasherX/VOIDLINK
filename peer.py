@@ -49,19 +49,36 @@ class Peer:
         return format_addr(self.host, self.port)
 
     @property
+    def _scheme(self) -> str:
+        """Use https when the peer is on port 443 (proxied/hosted node)."""
+        return "https" if self.port == 443 else "http"
+
+    @property
+    def _base_url(self) -> str:
+        """
+        Base URL for this peer.
+
+        - Port 443  → ``https://host``  (standard HTTPS, no port in URL)
+        - Any other → ``http://host:port``
+        """
+        if self.port == 443:
+            return f"https://{self.host}"
+        return f"http://{self.host}:{self.port}"
+
+    @property
     def message_url(self) -> str:
         """Endpoint for posting a message to this peer."""
-        return f"http://{self.host}:{self.port}/api/message"
+        return f"{self._base_url}/api/message"
 
     @property
     def hello_url(self) -> str:
         """Endpoint for sending a hello/connect handshake to this peer."""
-        return f"http://{self.host}:{self.port}/api/hello"
+        return f"{self._base_url}/api/hello"
 
     @property
     def bye_url(self) -> str:
         """Endpoint for sending a disconnect notification to this peer."""
-        return f"http://{self.host}:{self.port}/api/bye"
+        return f"{self._base_url}/api/bye"
 
     @property
     def is_encrypted(self) -> bool:

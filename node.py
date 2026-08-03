@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from typing import Optional
 
 import crypto
 import logger
@@ -62,6 +63,8 @@ class VoidlinkNode:
         port: int,
         latency_ms: int = 0,
         packet_loss_pct: float = 0.0,
+        advertise_host: Optional[str] = None,
+        advertise_port: Optional[int] = None,
     ) -> None:
         self.node_id: str = node_id
         self.started_at: float = time.time()
@@ -84,6 +87,8 @@ class VoidlinkNode:
             identity_public_key=self.identity_public_key,
             latency_ms=latency_ms,
             packet_loss_pct=packet_loss_pct,
+            advertise_host=advertise_host,
+            advertise_port=advertise_port,
         )
         self.ttl_manager = TTLManager(node_id=node_id, network=self.network)
         self.cli = CLIHandler(node=self)
@@ -196,16 +201,43 @@ def _parse_args() -> argparse.Namespace:
         metavar="PCT",
         help="Simulated packet-loss percentage 0–100 (default: 0)",
     )
+    parser.add_argument(
+        "--advertise",
+        default=None,
+        metavar="HOST[:PORT]",
+        help=(
+            "Public address to advertise to peers. "
+            "Use when behind NAT or a reverse proxy "
+            "(e.g. --advertise mypublichost.example.com:443). "
+            "On Replit: --advertise $REPLIT_DEV_DOMAIN:443"
+        ),
+    )
     return parser.parse_args()
+
+
+def _parse_advertise(value: Optional[str]) -> tuple[Optional[str], Optional[int]]:
+    """Split 'host:port' advertise string into (host, port). Port is optional."""
+    if not value:
+        return None, None
+    if ":" in value:
+        host, _, port_str = value.rpartition(":")
+        try:
+            return host.strip(), int(port_str.strip())
+        except ValueError:
+            pass
+    return value.strip(), None
 
 
 if __name__ == "__main__":
     args = _parse_args()
+    adv_host, adv_port = _parse_advertise(args.advertise)
     node = VoidlinkNode(
         node_id=args.id,
         host=args.host,
         port=args.port,
         latency_ms=args.latency,
         packet_loss_pct=args.loss,
+        advertise_host=adv_host,
+        advertise_port=adv_port,
     )
     node.start()

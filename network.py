@@ -71,10 +71,15 @@ class NetworkManager:
         identity_public_key: bytes,
         latency_ms: int = 0,
         packet_loss_pct: float = 0.0,
+        advertise_host: Optional[str] = None,
+        advertise_port: Optional[int] = None,
     ) -> None:
         self.node_id: str = node_id
         self.host: str = host
         self.port: int = port
+        # Public address announced to peers (used when behind NAT / a proxy)
+        self._advertise_host: Optional[str] = advertise_host
+        self._advertise_port: Optional[int] = advertise_port
         self.routing: "RoutingTable" = routing
         self.latency_ms: int = latency_ms
         self.packet_loss_pct: float = packet_loss_pct
@@ -395,7 +400,7 @@ class NetworkManager:
         payload: dict = {
             "node_id": self.node_id,
             "host": self._advertised_host(),
-            "port": self.port,
+            "port": self._advertised_port(),
         }
         if CRYPTO_ENABLED:
             payload["x25519_pub"] = self._x25519_pub.hex()
@@ -443,7 +448,7 @@ class NetworkManager:
         if peer is None:
             return False, f"Not connected to {addr}"
 
-        payload = {"host": self._advertised_host(), "port": self.port}
+        payload = {"host": self._advertised_host(), "port": self._advertised_port()}
         try:
             envelope = self._send_payload(peer, payload)
             self._session.post(peer.bye_url, json=envelope, timeout=REQUEST_TIMEOUT)
@@ -549,11 +554,26 @@ class NetworkManager:
     def _advertised_host(self) -> str:
         """
         Return the host we advertise to peers.
-        If binding on 0.0.0.0 we advertise 127.0.0.1 for same-machine peers.
+
+        Priority order:
+          1. ``--advertise`` override (e.g. a public hostname or Replit dev domain)
+          2. Bind host, if it is not a wildcard
+          3. ``127.0.0.1`` fallback for same-machine use when binding 0.0.0.0
         """
-        if self.host in ("0.0.0.0", ""):
-            return "127.0.0.1"
-        return self.host
+        if self._advertise_host:
+            return self._advertise_host
+        if self.host not in ("0.0.0.0", ""):
+            return self.host
+        return "127.0.0.1"
+
+    def _advertised_port(self) -> int:
+        """
+        Return the port we advertise to peers.
+
+        Normally the same as the bind port, but may differ when behind a
+        reverse proxy (e.g. Replit's dev domain sits on port 443).
+        """
+        return self._advertise_port if self._advertise_port is not None else self.port
 
     def store_message(self, msg: Message) -> None:
         with self.messages_lock:

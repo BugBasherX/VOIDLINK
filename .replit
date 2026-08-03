@@ -22,13 +22,13 @@ args = "Start application"
 name = "Start application"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "python node.py --id A --port 8000 --host 0.0.0.0"
-waitForPort = 8000
-
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python node.py --id A --port 8000 --host 0.0.0.0 --advertise $REPLIT_DEV_DOMAIN:443"
+waitForPort = 8000
 
 [[ports]]
 localPort = 8000

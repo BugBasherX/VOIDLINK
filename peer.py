@@ -3,11 +3,22 @@ VOIDLINK — Peer representation.
 
 A Peer is a remote node that this node knows about.  It stores the
 remote's advertised listen address so we can POST messages to it.
+
+Security additions (v2):
+  * ``x25519_pub``  — remote node's ephemeral X25519 public key (raw bytes),
+                      received during the /api/hello handshake.
+  * ``session_key`` — 32-byte AES-256-GCM key derived via ECDH from
+                      our X25519 private key + their X25519 public key.
+                      All subsequent payloads to/from this peer are
+                      encrypted with this key.
+  * ``ed25519_pub`` — remote node's Ed25519 identity public key (raw bytes),
+                      used to verify message signatures.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import Optional
 
 from utils import format_addr
@@ -20,6 +31,13 @@ class Peer:
     node_id: str    # Remote node's identifier (e.g. "A", "B", …)
     host: str       # Remote listen host (as advertised by the peer)
     port: int       # Remote listen port
+
+    # Crypto fields — populated during handshake
+    session_key: Optional[bytes] = field(default=None, repr=False)
+    ed25519_pub: Optional[bytes] = field(default=None, repr=False)
+
+    # Bookkeeping
+    connected_at: float = field(default_factory=time.time, repr=False)
 
     # ------------------------------------------------------------------ #
     # Properties                                                           #
@@ -45,6 +63,11 @@ class Peer:
         """Endpoint for sending a disconnect notification to this peer."""
         return f"http://{self.host}:{self.port}/api/bye"
 
+    @property
+    def is_encrypted(self) -> bool:
+        """True if a session key has been established with this peer."""
+        return self.session_key is not None
+
     # ------------------------------------------------------------------ #
     # Serialisation                                                        #
     # ------------------------------------------------------------------ #
@@ -69,4 +92,5 @@ class Peer:
         return self.address == other.address
 
     def __repr__(self) -> str:
-        return f"Peer(id={self.node_id!r}, addr={self.address!r})"
+        enc = " [E2E]" if self.is_encrypted else ""
+        return f"Peer(id={self.node_id!r}, addr={self.address!r}{enc})"

@@ -1,5 +1,5 @@
 """
-VOIDLINK — Node entry point.
+VOIDLINK — Node entry point (v2: E2E encrypted, concurrent).
 
 Usage::
 
@@ -14,6 +14,9 @@ Inside the REPL you can then type commands such as::
     /peers
     /stats
     /quit
+
+All inter-node communication is AES-256-GCM encrypted via ECDH-derived
+session keys.  Every message is signed with Ed25519 to prove authorship.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ import argparse
 import sys
 import time
 
+import crypto
 import logger
 from config import (
     APP_NAME,
@@ -42,10 +46,13 @@ class VoidlinkNode:
     """
     Top-level coordinator that wires together all subsystems:
 
-      NetworkManager  — Flask HTTP server + peer registry
+      NetworkManager  — Flask HTTP server + peer registry + encryption
       RoutingTable    — deduplication + flooding
       TTLManager      — background message expiry
       CLIHandler      — terminal command loop
+
+    Each node generates a fresh Ed25519 identity keypair at startup.
+    The keypair is ephemeral (in-memory only); persistence can be added later.
     """
 
     def __init__(
@@ -62,6 +69,10 @@ class VoidlinkNode:
         self.latency_ms: int = latency_ms
         self.packet_loss_pct: float = packet_loss_pct
 
+        # Generate Ed25519 identity keypair for this session
+        self.identity_private_key, self.identity_public_key = crypto.generate_identity()
+        self.fingerprint: str = crypto.fingerprint(self.identity_public_key)
+
         # Build subsystems
         self.routing = RoutingTable(node_id=node_id)
         self.network = NetworkManager(
@@ -69,6 +80,8 @@ class VoidlinkNode:
             host=host,
             port=port,
             routing=self.routing,
+            identity_private_key=self.identity_private_key,
+            identity_public_key=self.identity_public_key,
             latency_ms=latency_ms,
             packet_loss_pct=packet_loss_pct,
         )
@@ -87,7 +100,8 @@ class VoidlinkNode:
         """Start all background services and launch the CLI."""
         logger.banner(BANNER)
         logger.info(
-            f"{APP_NAME} v{VERSION} — Node {self.node_id!r} starting up",
+            f"{APP_NAME} v{VERSION} — Node {self.node_id!r} | "
+            f"fingerprint: {self.fingerprint}",
             self.node_id,
         )
 
@@ -106,33 +120,37 @@ class VoidlinkNode:
             except Exception:
                 pass
         self.ttl_manager.stop()
+        self.network._executor.shutdown(wait=False)
         logger.info("Node shut down. Goodbye.", self.node_id)
 
     # ------------------------------------------------------------------ #
     # Messaging                                                            #
     # ------------------------------------------------------------------ #
 
-    def send_message(self, content: str, ttl: int = 10) -> Message:
+    def send_message(self, content: str, ttl: int = 300) -> Message:
         """
-        Create and propagate a new message originating from this node.
+        Create, sign, and propagate a new message originating from this node.
 
         The message is:
-          1. Created with a fresh UUID and the node's sender_id.
-          2. Added to the local seen set (prevents self-forwarding loops).
-          3. Stored in the local message store.
-          4. Broadcast to all connected peers.
+          1. Created with a fresh UUID and sender_id.
+          2. Signed with this node's Ed25519 private key.
+          3. Added to the local seen set (prevents self-forwarding loops).
+          4. Stored in the local message store.
+          5. Broadcast concurrently to all connected peers.
         """
-        msg = Message.create(sender_id=self.node_id, content=content, ttl=ttl)
+        msg = Message.create(
+            sender_id=self.node_id,
+            content=content,
+            ttl=ttl,
+            private_key_bytes=self.identity_private_key,
+            public_key_bytes=self.identity_public_key,
+        )
 
-        # Mark seen immediately so we don't re-process our own message
         self.routing.mark_seen(msg.id)
-
-        # Store locally
         self.network.store_message(msg)
         self.ttl_manager.track(msg)
 
-        # Flood to peers
-        count = self.network.broadcast(msg)
+        self.network.broadcast(msg)
         self.messages_sent_count += 1
 
         return msg
@@ -145,7 +163,7 @@ class VoidlinkNode:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="node.py",
-        description=f"{APP_NAME} — CLI distributed messaging node",
+        description=f"{APP_NAME} — E2E encrypted distributed messaging node",
     )
     parser.add_argument(
         "--id",

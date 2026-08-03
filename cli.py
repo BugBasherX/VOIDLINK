@@ -1,5 +1,5 @@
 """
-VOIDLINK — CLI command handler.
+VOIDLINK — CLI command handler (v2).
 
 Parses and dispatches commands typed at the terminal prompt.
 All output goes through the logger module so colours are consistent.
@@ -12,6 +12,7 @@ import time
 import threading
 from typing import TYPE_CHECKING, Callable
 
+import crypto
 import logger
 from config import PROMPT, DEFAULT_TTL
 from utils import parse_addr, truncate, human_uptime, short_id
@@ -56,19 +57,14 @@ class CLIHandler:
 
     def run(self) -> None:
         """Block on stdin; dispatch commands."""
-        import sys
         interactive = sys.stdin.isatty()
         while self._running:
             try:
                 if interactive:
                     raw = input(PROMPT).strip()
                 else:
-                    # Non-interactive (piped / scripted): read without prompt
                     line = sys.stdin.readline()
                     if not line:
-                        # EOF on non-interactive stdin — keep the node alive
-                        # so it can still serve peers; just pause the loop.
-                        import time
                         time.sleep(0.1)
                         continue
                     raw = line.strip()
@@ -113,8 +109,8 @@ class CLIHandler:
     def _cmd_help(self, args: list[str]) -> None:
         lines = [
             "",
-            "  VOIDLINK — available commands",
-            "  " + "─" * 40,
+            "  VOIDLINK v2 — available commands",
+            "  " + "─" * 44,
         ]
         for name, text in sorted(_HELP_TEXT.items()):
             lines.append(f"  /{name:<16} {text}")
@@ -122,13 +118,15 @@ class CLIHandler:
         for line in lines:
             logger.cmd(line, self._node.node_id)
 
-    @command("send", "/send <message> [--ttl <seconds>]  — Broadcast a message")
+    @command("send", "/send <message> [--ttl <seconds>]  — Broadcast a signed, encrypted message")
     def _cmd_send(self, args: list[str]) -> None:
         if not args:
-            logger.error("Usage: /send <message text> [--ttl <seconds>]", self._node.node_id)
+            logger.error(
+                "Usage: /send <message text> [--ttl <seconds>]",
+                self._node.node_id,
+            )
             return
 
-        # Optional --ttl flag
         ttl = DEFAULT_TTL
         text_parts: list[str] = []
         i = 0
@@ -150,13 +148,15 @@ class CLIHandler:
             return
 
         msg = self._node.send_message(content, ttl=ttl)
+        peers = self._node.network.get_peers()
+        enc_peers = sum(1 for p in peers if p.is_encrypted)
         logger.send(
-            f"Sent message {msg.short_id()} to {len(self._node.network.get_peers())} peer(s)  "
-            f"| ttl={ttl}s | \"{truncate(content)}\"",
+            f"Sent {msg.short_id()} → {len(peers)} peer(s) "
+            f"({enc_peers} E2E encrypted) | ttl={ttl}s | \"{truncate(content)}\"",
             self._node.node_id,
         )
 
-    @command("connect", "/connect <host:port>  — Connect to a peer node")
+    @command("connect", "/connect <host:port>  — Connect to a peer (ECDH key exchange)")
     def _cmd_connect(self, args: list[str]) -> None:
         if not args:
             logger.error("Usage: /connect <host:port>", self._node.node_id)
@@ -170,7 +170,12 @@ class CLIHandler:
         logger.info(f"Connecting to {host}:{port}…", self._node.node_id)
         ok, result = self._node.network.connect_to(host, port)
         if ok:
-            logger.peer(f"Connected to Node {result} at {host}:{port}", self._node.node_id)
+            peer = self._node.network.get_peer_by_addr(f"{host}:{port}")
+            enc_status = " [E2E encrypted]" if (peer and peer.is_encrypted) else " [plaintext]"
+            logger.peer(
+                f"Connected to Node {result} at {host}:{port}{enc_status}",
+                self._node.node_id,
+            )
         else:
             logger.error(result, self._node.node_id)
 
@@ -187,11 +192,14 @@ class CLIHandler:
 
         ok, result = self._node.network.disconnect_from(host, port)
         if ok:
-            logger.peer(f"Disconnected from Node {result} ({host}:{port})", self._node.node_id)
+            logger.peer(
+                f"Disconnected from Node {result} ({host}:{port})",
+                self._node.node_id,
+            )
         else:
             logger.error(result, self._node.node_id)
 
-    @command("peers", "List all connected peers")
+    @command("peers", "List all connected peers and their encryption status")
     def _cmd_peers(self, args: list[str]) -> None:
         peers = self._node.network.get_peers()
         if not peers:
@@ -199,9 +207,16 @@ class CLIHandler:
             return
         logger.cmd(f"Connected peers ({len(peers)}):", self._node.node_id)
         for p in peers:
-            logger.cmd(f"  • {p.node_id:<10} {p.address}", self._node.node_id)
+            enc = "🔒 E2E" if p.is_encrypted else "⚠  plain"
+            fp = ""
+            if p.ed25519_pub:
+                fp = f"  fp:{crypto.fingerprint(p.ed25519_pub)}"
+            logger.cmd(
+                f"  • {p.node_id:<10} {p.address:<22} [{enc}]{fp}",
+                self._node.node_id,
+            )
 
-    @command("messages", "List all messages currently in memory")
+    @command("messages", "List messages in memory (shows signature status)")
     def _cmd_messages(self, args: list[str]) -> None:
         msgs = self._node.network.get_messages()
         if not msgs:
@@ -210,17 +225,34 @@ class CLIHandler:
         logger.cmd(f"In-memory messages ({len(msgs)}):", self._node.node_id)
         for m in sorted(msgs, key=lambda x: x.timestamp):
             rem = max(0.0, m.seconds_remaining())
+            if m.is_signed:
+                sig_ok = m.verify()
+                sig_tag = "✓ signed" if sig_ok else "✗ BAD SIG"
+            else:
+                sig_tag = "  unsigned"
             logger.cmd(
-                f"  [{m.short_id()}] from={m.sender_id} hops={m.hop_count} "
-                f"ttl={rem:.1f}s  \"{truncate(m.content, 50)}\"",
+                f"  [{m.short_id()}] from={m.sender_id:<8} hops={m.hop_count} "
+                f"ttl={rem:.0f}s [{sig_tag}]  \"{truncate(m.content, 48)}\"",
                 self._node.node_id,
             )
 
-    @command("node", "Show this node's info")
+    @command("node", "Show this node's identity and fingerprint")
     def _cmd_node(self, args: list[str]) -> None:
         n = self._node
         logger.cmd(
-            f"Node ID: {n.node_id}  |  Listening: {n.network._advertised_host()}:{n.network.port}",
+            f"Node ID      : {n.node_id}",
+            n.node_id,
+        )
+        logger.cmd(
+            f"Listen addr  : {n.network._advertised_host()}:{n.network.port}",
+            n.node_id,
+        )
+        logger.cmd(
+            f"Fingerprint  : {n.fingerprint}",
+            n.node_id,
+        )
+        logger.cmd(
+            f"Public key   : {n.identity_public_key.hex()[:32]}…",
             n.node_id,
         )
 
@@ -234,6 +266,8 @@ class CLIHandler:
         uptime = human_uptime(time.time() - n.started_at)
         peers = nw.get_peers()
         msgs = nw.get_messages()
+        enc_peers = sum(1 for p in peers if p.is_encrypted)
+        signed_msgs = sum(1 for m in msgs if m.is_signed)
 
         import psutil, os
         try:
@@ -247,24 +281,26 @@ class CLIHandler:
         sim_loss    = f"{nw.packet_loss_pct:.0f}%" if nw.packet_loss_pct > 0 else "off"
 
         rows = [
-            ("Node ID",            n.node_id),
-            ("Listen address",     f"{nw._advertised_host()}:{nw.port}"),
-            ("Connected peers",    str(len(peers))),
-            ("Messages in memory", str(len(msgs))),
-            ("Messages sent",      str(n.messages_sent_count)),
-            ("Messages received",  str(rt.messages_received)),
-            ("Messages forwarded", str(rt.messages_forwarded)),
-            ("Messages expired",   str(tm.messages_expired)),
-            ("Uptime",             uptime),
-            ("Memory usage",       mem_str),
-            ("Sim latency",        sim_latency),
-            ("Sim packet loss",    sim_loss),
+            ("Node ID",              n.node_id),
+            ("Fingerprint",          n.fingerprint),
+            ("Listen address",       f"{nw._advertised_host()}:{nw.port}"),
+            ("Connected peers",      f"{len(peers)} ({enc_peers} E2E encrypted)"),
+            ("Messages in memory",   f"{len(msgs)} ({signed_msgs} signed)"),
+            ("Messages sent",        str(n.messages_sent_count)),
+            ("Messages received",    str(rt.messages_received)),
+            ("Messages forwarded",   str(rt.messages_forwarded)),
+            ("Messages rejected",    str(nw.messages_rejected)),
+            ("Messages expired",     str(tm.messages_expired)),
+            ("Uptime",               uptime),
+            ("Memory usage",         mem_str),
+            ("Sim latency",          sim_latency),
+            ("Sim packet loss",      sim_loss),
         ]
 
-        logger.stat("── Node Statistics ─────────────────────", n.node_id)
+        logger.stat("── Node Statistics ─────────────────────────", n.node_id)
         for label, value in rows:
-            logger.stat(f"  {label:<22} {value}", n.node_id)
-        logger.stat("────────────────────────────────────────", n.node_id)
+            logger.stat(f"  {label:<24} {value}", n.node_id)
+        logger.stat("────────────────────────────────────────────", n.node_id)
 
     @command("clear", "Clear the terminal screen")
     def _cmd_clear(self, args: list[str]) -> None:
